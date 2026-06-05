@@ -1,0 +1,17 @@
+# Env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Camoufox browser cache (baixado via `python -m camoufox fetch`)
+.cache/
+
+# Logs / artefatos
+*.log
+*.csv
