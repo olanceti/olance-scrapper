@@ -27,6 +27,8 @@ log = logging.getLogger("scraper")
 
 # A cada quantos imóveis raspados enviar um lote ao OLANCE (progresso incremental)
 FLUSH_EVERY = 50
+# Após N bloqueios seguidos, o IP foi limitado pela Caixa — encerra e tenta no próximo run
+CONSECUTIVE_BLOCK_LIMIT = 8
 # Página da Caixa visitada antes do loop para estabelecer a sessão/cookie do Radware
 WARMUP_URL = "https://venda-imoveis.caixa.gov.br/sistema/busca-imovel.asp"
 
@@ -38,6 +40,44 @@ def import_csv(client: OlanceClient, headless: bool) -> None:
     log.info("✅ %d imóveis importados", imported)
 
 
+def _warmup(page) -> None:
+    """Visita uma página da Caixa para passar o desafio JS uma vez antes do loop."""
+    try:
+        page.goto(WARMUP_URL, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(3_000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Aviso no warmup: %s", exc)
+
+
+def _scrape_loop(page, numeros: list[str], cfg, buffer: list[dict], flush, stats: dict) -> bool:
+    """Raspa cada imóvel. Retorna True se foi interrompido por bloqueio em série."""
+    consecutive_blocks = 0
+    total = len(numeros)
+    for i, numero in enumerate(numeros, start=1):
+        data = scrape_detail(page, numero)
+        if data is not None:
+            buffer.append(data)
+            stats["scraped"] += 1
+            consecutive_blocks = 0
+        else:
+            consecutive_blocks += 1
+            if consecutive_blocks >= CONSECUTIVE_BLOCK_LIMIT:
+                log.warning(
+                    "⛔ %d bloqueios seguidos — IP provavelmente limitado pela Caixa. "
+                    "Encerrando (os %d restantes voltam no próximo run).",
+                    consecutive_blocks, total - i,
+                )
+                return True
+
+        if len(buffer) >= FLUSH_EVERY:
+            flush()
+        if i < total:
+            time.sleep(random.uniform(cfg.detail_min_delay, cfg.detail_max_delay))
+        if i % 25 == 0:
+            log.info("   progresso: %d/%d raspados=%d", i, total, stats["scraped"])
+    return False
+
+
 def enrich_details(client: OlanceClient, cfg) -> None:
     numeros = client.get_pending(cfg.batch_size)
     if not numeros:
@@ -45,50 +85,25 @@ def enrich_details(client: OlanceClient, cfg) -> None:
         return
 
     log.info("🔎 Enriquecendo %d imóveis (raspando detalhes)...", len(numeros))
-    sent_total = 0
-    scraped_total = 0
+    stats = {"scraped": 0, "sent": 0}
     buffer: list[dict] = []
 
     def flush() -> None:
-        nonlocal sent_total, buffer
         if not buffer:
             return
         updated = client.post_enrichment(buffer)
-        sent_total += updated
-        log.info("   ↳ lote enviado: %d atualizados (acumulado %d)", updated, sent_total)
-        buffer = []
+        stats["sent"] += updated
+        log.info("   ↳ lote enviado: %d atualizados (acumulado %d)", updated, stats["sent"])
+        buffer.clear()
 
     with Camoufox(headless=cfg.headless, humanize=True, locale="pt-BR") as browser:
         page = browser.new_page()
-
-        # Aquece a sessão (passa o desafio JS uma vez)
-        try:
-            page.goto(WARMUP_URL, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(3_000)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Aviso no warmup: %s", exc)
-
-        for i, numero in enumerate(numeros, start=1):
-            data = scrape_detail(page, numero)
-            if data is not None:
-                buffer.append(data)
-                scraped_total += 1
-            else:
-                # Bloqueado/erro: não envia — fica NULL no banco e é retentado amanhã
-                pass
-
-            if len(buffer) >= FLUSH_EVERY:
-                flush()
-
-            if i < len(numeros):
-                time.sleep(random.uniform(cfg.detail_min_delay, cfg.detail_max_delay))
-
-            if i % 25 == 0:
-                log.info("   progresso: %d/%d raspados=%d", i, len(numeros), scraped_total)
-
+        _warmup(page)
+        aborted = _scrape_loop(page, numeros, cfg, buffer, flush, stats)
         flush()
 
-    log.info("✅ Enriquecimento concluído: %d raspados, %d salvos no OLANCE", scraped_total, sent_total)
+    status = "interrompido (IP bloqueado)" if aborted else "concluído"
+    log.info("✅ Enriquecimento %s: %d raspados, %d salvos no OLANCE", status, stats["scraped"], stats["sent"])
 
 
 def main() -> int:
@@ -99,15 +114,15 @@ def main() -> int:
 
     try:
         import_csv(client, cfg.headless)
-    except Exception as exc:  # noqa: BLE001
-        log.error("❌ Falha na importação do CSV: %s", exc)
+    except Exception:  # noqa: BLE001
+        log.exception("❌ Falha na importação do CSV")
         # Sem CSV não há o que enriquecer de novo; aborta
         return 1
 
     try:
         enrich_details(client, cfg)
-    except Exception as exc:  # noqa: BLE001
-        log.error("❌ Falha no enriquecimento: %s", exc)
+    except Exception:  # noqa: BLE001
+        log.exception("❌ Falha no enriquecimento")
         return 1
 
     log.info("🏁 Concluído com sucesso.")

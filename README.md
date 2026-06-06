@@ -13,7 +13,15 @@ Roda separado do OLANCE porque a Caixa usa **Radware Bot Manager** e o IP do ser
 4. Envia os dados enriquecidos                   → POST /api/admin/leiloes/enrich-batch
 ```
 
-O OLANCE é a fonte da verdade. Imóveis bloqueados pelo anti-bot ficam sem `detalhes_enriched_at` e são **retentados no dia seguinte** automaticamente. Como são milhares de imóveis, o enriquecimento é feito em **lotes (`BATCH_SIZE`, default 300/dia)**, priorizando os recém-importados — o acervo é coberto ao longo de vários dias.
+O OLANCE é a fonte da verdade. Imóveis bloqueados pelo anti-bot ficam sem `detalhes_enriched_at` e são **retentados no próximo run** automaticamente, priorizando os recém-importados.
+
+### Limite da Caixa (importante)
+
+O **CSV** é liberado de qualquer IP, mas as **páginas de detalhe** têm um limite: a Caixa bloqueia o IP após **~150 requisições** seguidas. Por isso:
+
+- `BATCH_SIZE=130` por execução (abaixo do limite, completa limpo)
+- **Disjuntor**: o scraper encerra após 8 bloqueios seguidos (não desperdiça tempo martelando um IP já barrado)
+- A vazão é dada por **runs/dia × 130**. Cada execução do GitHub Actions usa um **IP diferente**, então rodar várias vezes/dia multiplica a cobertura. O agendamento padrão é **6×/dia** (a cada 4h ≈ 780 detalhes/dia → ~28k em ~36 dias). Imóveis novos têm prioridade, então ficam atualizados em ~1 dia independente do backlog.
 
 ## Configuração
 
@@ -23,7 +31,7 @@ Copie `.env.example` para `.env` e preencha:
 |---|---|
 | `OLANCE_URL` | URL base do OLANCE (ex: `https://olance.app`) |
 | `CRON_SECRET` | Mesmo segredo do `CRON_SECRET` no OLANCE |
-| `BATCH_SIZE` | Imóveis enriquecidos por execução (default 300) |
+| `BATCH_SIZE` | Imóveis enriquecidos por execução (default 130 — abaixo do limite da Caixa) |
 | `HEADLESS` | `true` em servidor/CI; `false` para ver o browser ao depurar |
 | `DETAIL_MIN_DELAY` / `DETAIL_MAX_DELAY` | Intervalo (s) entre requisições de detalhe |
 
@@ -39,17 +47,21 @@ python -m scraper.main
 
 ## Deploy
 
-### Opção 1 — GitHub Actions (teste inicial)
-`.github/workflows/scrape.yml` roda diariamente às 06:00 UTC. Configure os **secrets** do repositório:
-- `OLANCE_URL`
-- `CRON_SECRET`
+### GitHub Actions (recomendado — repo público = minutos ilimitados)
+`.github/workflows/scrape.yml` roda **6×/dia** (a cada 4h, no minuto 17). Cada execução
+usa um IP diferente do pool do GitHub, o que contorna o limite de ~150/IP da Caixa.
+
+Configure os **secrets** do repositório (**Settings → Secrets and variables → Actions**):
+- `OLANCE_URL` (ex: `https://olance.app`)
+- `CRON_SECRET` (mesmo segredo do OLANCE)
 
 Dispare manualmente em **Actions → Scraper Leilões Caixa → Run workflow** para testar.
 
-> ⚠️ IPs do GitHub Actions (Azure) podem estar bloqueados pela Caixa. Se o log acusar
-> "possível bloqueio anti-bot", migre a execução para um IP não bloqueado (abaixo).
+> 💡 Em **repo público** os minutos do Actions são **ilimitados e grátis**. Os secrets
+> continuam criptografados e **não** são expostos a workflows de PRs de forks. Mantenha
+> a frequência em ~3-6 runs/dia por educação com a Caixa (evita endurecer a proteção).
 
-### Opção 2 — VPS (OVH / SoYouStart) ou máquina local
+### Alternativa — VPS (OVH / SoYouStart) ou máquina local
 O código é agnóstico de ambiente. Em qualquer host com Python:
 
 ```bash

@@ -2,13 +2,20 @@ name: Scraper Leilões Caixa
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # 06:00 UTC = 03:00 BRT
+    # 6 execuções/dia, a cada 4h (cada run pega um IP novo → ~130 detalhes/run).
+    # Minuto 17 (não :00) para evitar o congestionamento de agendamentos do GitHub.
+    - cron: '17 */4 * * *'
   workflow_dispatch:
+
+# Evita execuções sobrepostas se uma demorar mais que o intervalo
+concurrency:
+  group: scraper-leiloes
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -37,6 +44,6 @@ jobs:
         env:
           OLANCE_URL: ${{ secrets.OLANCE_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
-          BATCH_SIZE: '300'
+          BATCH_SIZE: '130'
           HEADLESS: 'true'
         run: xvfb-run -a python -m scraper.main
