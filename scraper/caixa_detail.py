@@ -1,7 +1,8 @@
 """Raspa a página de detalhe de um imóvel da Caixa e extrai os campos que não vêm no CSV.
 
-Campos: matrícula, comarca, leiloeiro, inscrição imobiliária,
-datas e preços do 1º e 2º leilão.
+Campos: aceita FGTS, datas e preços dos leilões (varia por modalidade), responsabilidade
+de condomínio e tributos, inscrição fiscal, link do edital.
+A matrícula NÃO é raspada aqui — sua URL é derivada no OLANCE (uf+numero).
 """
 from __future__ import annotations
 
@@ -11,34 +12,34 @@ import re
 log = logging.getLogger("scraper.detail")
 
 DETAIL_URL = "https://venda-imoveis.caixa.gov.br/sistema/detalhe-imovel.asp?hdnOrigem=index&hdnimovel={numero}"
+_BASE_URL = "https://venda-imoveis.caixa.gov.br"
 
-# Ordinal tolerante (º, °, ª ou 'o') e "Leilão"/"Leilao"
 _ORD = r"[ºo°ª]?"
 _LEILAO = r"Leil[ãa]o"
+_DATE = r"(\d{2}/\d{2}/\d{4}\s*-\s*\d{1,2}h\d{2})"
 
-_RE_MATRICULA = re.compile(r"Matr[íi]cula\(?s?\)?:\s*(\d+)", re.IGNORECASE)
-_RE_COMARCA = re.compile(r"Comarca:\s*(.+?)\s+(?:Of[íi]cio|Inscri|Averba)", re.IGNORECASE)
 _RE_INSCRICAO = re.compile(r"Inscri[çc][ãa]o\s+imobili[áa]ria:\s*([\d.]+)", re.IGNORECASE)
-_RE_LEILOEIRO = re.compile(r"Leiloeiro\(a\):\s*(.+?)\s+(?:Data\s+do|Endere|$)", re.IGNORECASE)
+_RE_FGTS = re.compile(r"Permite\s+utiliza[çc][ãa]o\s+de\s+FGTS", re.IGNORECASE)
 
-_RE_DATA_1 = re.compile(
-    rf"Data\s+do\s+1{_ORD}\s*{_LEILAO}\s*-\s*(\d{{2}}/\d{{2}}/\d{{4}}\s*-\s*\d{{1,2}}h\d{{2}})",
+# Datas — SFI tem 1º e 2º; Licitação Aberta tem uma só ("Data da Licitação Aberta")
+_RE_DATA_1 = re.compile(rf"Data\s+do\s+1{_ORD}\s*{_LEILAO}\s*-\s*{_DATE}", re.IGNORECASE)
+_RE_DATA_2 = re.compile(rf"Data\s+do\s+2{_ORD}\s*{_LEILAO}\s*-\s*{_DATE}", re.IGNORECASE)
+_RE_DATA_LICITACAO = re.compile(rf"Data\s+da\s+Licita[çc][ãa]o[^-\d]*-\s*{_DATE}", re.IGNORECASE)
+
+# Preços — SFI tem "mínimo de venda 1º/2º Leilão"; demais têm "mínimo de venda:" (único)
+_RE_PRECO_1 = re.compile(rf"m[íi]nimo\s+de\s+venda\s+1{_ORD}\s*{_LEILAO}:?\s*R\$\s*([\d.]+,\d{{2}})", re.IGNORECASE)
+_RE_PRECO_2 = re.compile(rf"m[íi]nimo\s+de\s+venda\s+2{_ORD}\s*{_LEILAO}:?\s*R\$\s*([\d.]+,\d{{2}})", re.IGNORECASE)
+_RE_PRECO_UNICO = re.compile(r"m[íi]nimo\s+de\s+venda:\s*R\$\s*([\d.]+,\d{2})", re.IGNORECASE)
+
+# Responsabilidade — texto pode ser longo (explica limite de 10% etc.)
+_RE_CONDOMINIO = re.compile(r"Condom[íi]nio:\s*(.+?)\s*(?:Tributos:|$)", re.IGNORECASE)
+_RE_TRIBUTOS = re.compile(
+    r"Tributos:\s*(.+?)\s*(?:Baixar|Regras\s+da|Edital|D[êe]\s+seu\s+lance|Sou\s+o\s+ex|"
+    r"Corretores|Formas\s+de\s+pagamento|$)",
     re.IGNORECASE,
 )
-_RE_DATA_2 = re.compile(
-    rf"Data\s+do\s+2{_ORD}\s*{_LEILAO}\s*-\s*(\d{{2}}/\d{{2}}/\d{{4}}\s*-\s*\d{{1,2}}h\d{{2}})",
-    re.IGNORECASE,
-)
-_RE_PRECO_1 = re.compile(
-    rf"m[íi]nimo\s+de\s+venda\s+1{_ORD}\s*{_LEILAO}:?\s*R\$\s*([\d.]+,\d{{2}})",
-    re.IGNORECASE,
-)
-_RE_PRECO_2 = re.compile(
-    rf"m[íi]nimo\s+de\s+venda\s+2{_ORD}\s*{_LEILAO}:?\s*R\$\s*([\d.]+,\d{{2}})",
-    re.IGNORECASE,
-)
-# Fallback: todos os valores "mínimo ... R$" em ordem
-_RE_PRECO_ANY = re.compile(r"m[íi]nimo[^R]{0,40}R\$\s*([\d.]+,\d{2})", re.IGNORECASE)
+
+_RE_EXIBEDOC = re.compile(r"ExibeDoc\(['\"]([^'\"]+)['\"]\)", re.IGNORECASE)
 
 
 def _parse_brl(s: str | None) -> float | None:
@@ -62,8 +63,7 @@ def is_blocked(text: str) -> bool:
     lowered = text.lower()
     if "bot manager" in lowered or "captcha" in lowered:
         return True
-    # página real sempre contém "Leilão"/"Leilao"
-    return "leil" not in lowered
+    return "leil" not in lowered and "venda" not in lowered
 
 
 def parse_detail_text(raw_text: str, numero: str) -> dict | None:
@@ -73,28 +73,56 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
 
     text = re.sub(r"\s+", " ", raw_text)
 
-    preco_1 = _parse_brl(_m(_RE_PRECO_1, text))
-    preco_2 = _parse_brl(_m(_RE_PRECO_2, text))
+    # Datas
+    primeiro_data = _m(_RE_DATA_1, text)
+    segundo_data = _m(_RE_DATA_2, text)
+    if not primeiro_data:
+        # Licitação Aberta tem uma data única → vai pro "primeiro"
+        primeiro_data = _m(_RE_DATA_LICITACAO, text)
 
-    # Fallback de preços por ordem (1º depois 2º) se os rótulos específicos falharem
-    if preco_1 is None or preco_2 is None:
-        ordered = _RE_PRECO_ANY.findall(text)
-        if preco_1 is None and len(ordered) >= 1:
-            preco_1 = _parse_brl(ordered[0])
-        if preco_2 is None and len(ordered) >= 2:
-            preco_2 = _parse_brl(ordered[1])
+    # Preços
+    primeiro_preco = _parse_brl(_m(_RE_PRECO_1, text))
+    segundo_preco = _parse_brl(_m(_RE_PRECO_2, text))
+    if primeiro_preco is None:
+        # Modalidades de leilão único usam "mínimo de venda:" (sem ordinal)
+        primeiro_preco = _parse_brl(_m(_RE_PRECO_UNICO, text))
+
+    # Responsabilidade (corta em ~400 chars pra caber na coluna)
+    condominio = _m(_RE_CONDOMINIO, text)
+    tributos = _m(_RE_TRIBUTOS, text)
 
     return {
         "numeroImovel": numero,
-        "matricula": _m(_RE_MATRICULA, text),
-        "comarca": _m(_RE_COMARCA, text),
-        "leiloeiro": _m(_RE_LEILOEIRO, text),
+        "aceitaFgts": bool(_RE_FGTS.search(text)),
         "inscricaoImobiliaria": _m(_RE_INSCRICAO, text),
-        "primeiroLeilaoData": _m(_RE_DATA_1, text),
-        "primeiroLeilaoPreco": preco_1,
-        "segundoLeilaoData": _m(_RE_DATA_2, text),
-        "segundoLeilaoPreco": preco_2,
+        "primeiroLeilaoData": primeiro_data,
+        "primeiroLeilaoPreco": primeiro_preco,
+        "segundoLeilaoData": segundo_data,
+        "segundoLeilaoPreco": segundo_preco,
+        "condominioResponsavel": condominio[:400] if condominio else None,
+        "tributosResponsavel": tributos[:400] if tributos else None,
     }
+
+
+def _extract_edital_url(page) -> str | None:
+    """Lê o onclick `ExibeDoc('/editais/...PDF')` do botão de edital.
+
+    A matrícula NÃO é extraída aqui — sua URL é derivada no OLANCE (uf+numero).
+    """
+    try:
+        els = page.query_selector_all('[onclick*="ExibeDoc"]')
+        for el in els:
+            onclick = el.get_attribute("onclick") or ""
+            m = _RE_EXIBEDOC.search(onclick)
+            if not m:
+                continue
+            path = m.group(1)
+            if "/matricula/" in path.lower():
+                continue  # é a matrícula, ignora (derivada no OLANCE)
+            return path if path.startswith("http") else f"{_BASE_URL}{path}"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def scrape_detail(page, numero: str) -> dict | None:
@@ -111,4 +139,7 @@ def scrape_detail(page, numero: str) -> dict | None:
     data = parse_detail_text(text, numero)
     if data is None:
         log.warning("[%s] página bloqueada/sem conteúdo", numero)
+        return None
+
+    data["editalUrl"] = _extract_edital_url(page)
     return data
