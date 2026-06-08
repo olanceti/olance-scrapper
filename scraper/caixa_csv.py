@@ -56,13 +56,21 @@ def download_csv(headless: bool = True) -> bytes:
         except Exception as exc:  # noqa: BLE001
             log.warning("Captura de resposta falhou (%s), tentando innerText...", exc)
 
-        # Fallback: texto renderizado
+        # Fallback: texto renderizado (só se a captura da resposta falhar)
         if not csv_bytes:
             try:
                 text = page.inner_text("body")
-                csv_bytes = text.encode("cp1252", errors="replace")
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"Não foi possível ler o CSV: {exc}") from exc
+            # Se o navegador mangleou o encoding (decodificou como UTF-8 e gerou o
+            # char de substituição �), os acentos já estão perdidos. NÃO enviar lixo
+            # — melhor falhar e deixar o próximo run (com a resposta crua) corrigir.
+            if "�" in text:
+                raise RuntimeError(
+                    "CSV veio com encoding corrompido (char de substituição) — abortando para não gravar acentos errados"
+                )
+            # innerText correto (Firefox usa win1252 como fallback Western) → latin1 preserva 0x00-0xFF
+            csv_bytes = text.encode("latin-1", errors="replace")
 
     if not csv_bytes or not _has_data_lines(csv_bytes):
         raise RuntimeError("CSV inválido — possível bloqueio anti-bot (não veio CSV)")
