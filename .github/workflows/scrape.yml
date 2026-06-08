@@ -38,7 +38,17 @@ jobs:
           pip install -r requirements.txt
 
       - name: Baixar Camoufox (Firefox stealth)
-        run: python -m camoufox fetch
+        run: |
+          set +e
+          # O navegador baixa primeiro; a base GeoIP (servidor de terceiros P3TERX) às vezes dá 500.
+          # Não usamos geoip em runtime, então retentamos e toleramos a falha do MMDB.
+          for attempt in 1 2 3; do
+            python -m camoufox fetch && { echo "Camoufox OK na tentativa $attempt"; exit 0; }
+            echo "::warning::Tentativa $attempt do fetch falhou (provavelmente MMDB geoip). Retry em 20s..."
+            sleep 20
+          done
+          echo "::warning::MMDB geoip indisponível após 3 tentativas — seguindo (geoip não é usado em runtime)."
+          exit 0
 
       - name: Rodar scraper
         env:
