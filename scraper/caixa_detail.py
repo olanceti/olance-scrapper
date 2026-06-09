@@ -20,6 +20,7 @@ _DATE = r"(\d{2}/\d{2}/\d{4}\s*-\s*\d{1,2}h\d{2})"
 
 _RE_INSCRICAO = re.compile(r"Inscri[çc][ãa]o\s+imobili[áa]ria:\s*([\d.]+)", re.IGNORECASE)
 _RE_FGTS = re.compile(r"Permite\s+utiliza[çc][ãa]o\s+de\s+FGTS", re.IGNORECASE)
+_RE_RECURSOS = re.compile(r"Recursos\s+pr[óo]prios", re.IGNORECASE)
 
 # Datas — SFI tem 1º e 2º; Licitação Aberta tem uma só ("Data da Licitação Aberta")
 _RE_DATA_1 = re.compile(rf"Data\s+do\s+1{_ORD}\s*{_LEILAO}\s*-\s*{_DATE}", re.IGNORECASE)
@@ -94,6 +95,7 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
     return {
         "numeroImovel": numero,
         "aceitaFgts": bool(_RE_FGTS.search(text)),
+        "recursosProprios": bool(_RE_RECURSOS.search(text)),
         "inscricaoImobiliaria": _m(_RE_INSCRICAO, text),
         "primeiroLeilaoData": primeiro_data,
         "primeiroLeilaoPreco": primeiro_preco,
