@@ -19,6 +19,7 @@ _LEILAO = r"Leil[ãa]o"
 _DATE = r"(\d{2}/\d{2}/\d{4}\s*-\s*\d{1,2}h\d{2})"
 
 _RE_INSCRICAO = re.compile(r"Inscri[çc][ãa]o\s+imobili[áa]ria:\s*([\d.]+)", re.IGNORECASE)
+_RE_CEP = re.compile(r"CEP:\s*(\d{5}-?\d{3})", re.IGNORECASE)
 _RE_FGTS = re.compile(r"Permite\s+utiliza[çc][ãa]o\s+de\s+FGTS", re.IGNORECASE)
 _RE_RECURSOS = re.compile(r"Recursos\s+pr[óo]prios", re.IGNORECASE)
 
@@ -97,6 +98,7 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
         "aceitaFgts": bool(_RE_FGTS.search(text)),
         "recursosProprios": bool(_RE_RECURSOS.search(text)),
         "inscricaoImobiliaria": _m(_RE_INSCRICAO, text),
+        "cep": _m(_RE_CEP, text),
         "primeiroLeilaoData": primeiro_data,
         "primeiroLeilaoPreco": primeiro_preco,
         "segundoLeilaoData": segundo_data,
@@ -127,6 +129,24 @@ def _extract_edital_url(page) -> str | None:
     return None
 
 
+def _extract_loteamento(page) -> str | None:
+    """Lê o título do imóvel (nome do loteamento/localidade) — o 1º <h5> da página.
+
+    Ex: 'LOT PQ VIDA NOVA VOTUPORANGA III'. Não vem no CSV.
+    """
+    try:
+        el = page.query_selector("h5")
+        if not el:
+            return None
+        t = (el.inner_text() or "").strip()
+        # Sanidade: não vazio e tamanho plausível de um nome
+        if 2 <= len(t) <= 200:
+            return t
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def scrape_detail(page, numero: str) -> dict | None:
     """Navega até o detalhe e extrai os dados. Retorna None se bloqueado/erro."""
     url = DETAIL_URL.format(numero=numero)
@@ -144,4 +164,5 @@ def scrape_detail(page, numero: str) -> dict | None:
         return None
 
     data["editalUrl"] = _extract_edital_url(page)
+    data["loteamento"] = _extract_loteamento(page)
     return data
