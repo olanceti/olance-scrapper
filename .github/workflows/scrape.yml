@@ -4,12 +4,19 @@ on:
   schedule:
     # 6 execuções/dia, a cada 4h (cada run pega um IP novo → ~130 detalhes/run).
     # Minuto 17 (não :00) para evitar o congestionamento de agendamentos do GitHub.
+    # OBS: o gatilho confiável é o croner do Railway (workflow_dispatch); este cron é fallback.
     - cron: '17 */4 * * *'
   workflow_dispatch:
+    inputs:
+      numero:
+        description: 'Enriquecer só este imóvel (número da Caixa). Vazio = run normal (CSV + lote).'
+        required: false
+        default: ''
 
-# Evita execuções sobrepostas se uma demorar mais que o intervalo
+# Runs normais compartilham o grupo (serializa). Run de imóvel único usa grupo próprio
+# para rodar na hora, sem ficar na fila atrás de um run em andamento.
 concurrency:
-  group: scraper-leiloes
+  group: ${{ github.event.inputs.numero && format('scraper-single-{0}', github.event.inputs.numero) || 'scraper-leiloes' }}
   cancel-in-progress: false
 
 jobs:
@@ -56,4 +63,5 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           BATCH_SIZE: '130'
           HEADLESS: 'true'
+          TARGET_NUMERO: ${{ github.event.inputs.numero }}
         run: xvfb-run -a python -m scraper.main

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import sys
 import time
@@ -106,11 +107,40 @@ def enrich_details(client: OlanceClient, cfg) -> None:
     log.info("✅ Enriquecimento %s: %d raspados, %d salvos no OLANCE", status, stats["scraped"], stats["sent"])
 
 
+def enrich_single(client: OlanceClient, cfg, numero: str) -> int:
+    """Modo alvo único: raspa só um imóvel e envia (sem CSV nem fila de pendentes).
+
+    Usado pelo botão "Enriquecer imóvel" do admin no OLANCE (workflow_dispatch
+    com input `numero`). Roda em paralelo aos runs agendados (concurrency group próprio).
+    """
+    log.info("🎯 Modo alvo único: enriquecendo imóvel %s", numero)
+    with Camoufox(headless=cfg.headless, humanize=True, locale="pt-BR") as browser:
+        page = browser.new_page()
+        _warmup(page)
+        data = scrape_detail(page, numero)
+
+    if data is None:
+        log.warning("⚠️ Imóvel %s bloqueado/sem conteúdo — não enriquecido.", numero)
+        return 1
+
+    updated = client.post_enrichment([data])
+    log.info("✅ Imóvel %s enriquecido (%d atualizado no OLANCE).", numero, updated)
+    return 0
+
+
 def main() -> int:
     cfg = load_config()
     client = OlanceClient(cfg.olance_url, cfg.cron_secret)
 
     log.info("=== Scraper Leilões Caixa → OLANCE (%s) ===", cfg.olance_url)
+
+    target = os.environ.get("TARGET_NUMERO", "").strip()
+    if target:
+        try:
+            return enrich_single(client, cfg, target)
+        except Exception:  # noqa: BLE001
+            log.exception("❌ Falha no enriquecimento alvo único (%s)", target)
+            return 1
 
     try:
         import_csv(client, cfg.headless)
