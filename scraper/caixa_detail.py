@@ -34,10 +34,16 @@ _RE_PRECO_2 = re.compile(rf"m[íi]nimo\s+de\s+venda\s+2{_ORD}\s*{_LEILAO}:?\s*R\
 _RE_PRECO_UNICO = re.compile(r"m[íi]nimo\s+de\s+venda:\s*R\$\s*([\d.]+,\d{2})", re.IGNORECASE)
 
 # Responsabilidade — texto pode ser longo (explica limite de 10% etc.)
-_RE_CONDOMINIO = re.compile(r"Condom[íi]nio:\s*(.+?)\s*(?:Tributos:|$)", re.IGNORECASE)
-_RE_TRIBUTOS = re.compile(
-    r"Tributos:\s*(.+?)\s*(?:Baixar|Regras\s+da|Edital|D[êe]\s+seu\s+lance|Sou\s+o\s+ex|"
-    r"Corretores|Formas\s+de\s+pagamento|$)",
+# Palavras que marcam o fim do bloco (chrome da página) — pra não engolir o resto da tela.
+_STOP_RESP = (
+    r"Baixar|Regras\s+da|Edital|D[êe]\s+seu\s+lance|Sou\s+o\s+ex|Corretores|"
+    r"Formas\s+de\s+pagamento|Galeria|Outros\s+produtos|Fazer\s+uma\s+proposta|Voltar|Caixa\s+Melhor"
+)
+_RE_CONDOMINIO = re.compile(rf"Condom[íi]nio:\s*(.+?)\s*(?:Tributos:|{_STOP_RESP}|$)", re.IGNORECASE)
+_RE_TRIBUTOS = re.compile(rf"Tributos:\s*(.+?)\s*(?:{_STOP_RESP}|$)", re.IGNORECASE)
+# Formato combinado: "Tributos e condomínio: ..." / "Condomínio e tributos: ..." → mesmo valor pros dois.
+_RE_RESP_COMBINADO = re.compile(
+    rf"(?:Tributos\s+e\s+condom[íi]nio|Condom[íi]nio\s+e\s+tributos):\s*(.+?)\s*(?:{_STOP_RESP}|$)",
     re.IGNORECASE,
 )
 
@@ -89,9 +95,15 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
         # Modalidades de leilão único usam "mínimo de venda:" (sem ordinal)
         primeiro_preco = _parse_brl(_m(_RE_PRECO_UNICO, text))
 
-    # Responsabilidade (corta em ~400 chars pra caber na coluna)
-    condominio = _m(_RE_CONDOMINIO, text)
-    tributos = _m(_RE_TRIBUTOS, text)
+    # Responsabilidade (corta em ~400 chars pra caber na coluna).
+    # Formato combinado ("Tributos e condomínio: ...") preenche os dois com o mesmo valor.
+    combinado = _m(_RE_RESP_COMBINADO, text)
+    if combinado:
+        condominio = combinado
+        tributos = combinado
+    else:
+        condominio = _m(_RE_CONDOMINIO, text)
+        tributos = _m(_RE_TRIBUTOS, text)
 
     return {
         "numeroImovel": numero,
@@ -130,20 +142,23 @@ def _extract_edital_url(page) -> str | None:
 
 
 def _extract_loteamento(page) -> str | None:
-    """Lê o título do imóvel (nome do loteamento/localidade) — o 1º <h5> da página.
+    """Lê o título do imóvel (nome do loteamento/condomínio/localidade).
 
-    Ex: 'LOT PQ VIDA NOVA VOTUPORANGA III'. Não vem no CSV.
+    É o <h5> no topo do bloco de dados da Caixa — pega independente do TEXTO
+    (ex: 'LOT PQ VIDA NOVA...', 'VILLA VIC ... CONDOMÍNIO RAVENA'). Não vem no CSV.
+    Tenta dentro de #dadosImovel (mais específico) e cai pro 1º <h5> da página.
     """
-    try:
-        el = page.query_selector("h5")
-        if not el:
-            return None
-        t = (el.inner_text() or "").strip()
-        # Sanidade: não vazio e tamanho plausível de um nome
-        if 2 <= len(t) <= 200:
-            return t
-    except Exception:  # noqa: BLE001
-        pass
+    for sel in ("#dadosImovel h5", "h5"):
+        try:
+            el = page.query_selector(sel)
+            if not el:
+                continue
+            t = (el.inner_text() or "").strip()
+            # Sanidade: não vazio e tamanho plausível de um nome
+            if 2 <= len(t) <= 200:
+                return t
+        except Exception:  # noqa: BLE001
+            continue
     return None
 
 
