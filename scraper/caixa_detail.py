@@ -37,10 +37,13 @@ _RE_PRECO_UNICO = re.compile(r"m[íi]nimo\s+de\s+venda:\s*R\$\s*([\d.]+,\d{2})",
 # Palavras que marcam o fim do bloco (chrome da página) — pra não engolir o resto da tela.
 _STOP_RESP = (
     r"Baixar|Regras\s+da|Edital|D[êe]\s+seu\s+lance|Sou\s+o\s+ex|Corretores|"
-    r"Formas\s+de\s+pagamento|Galeria|Outros\s+produtos|Fazer\s+uma\s+proposta|Voltar|Caixa\s+Melhor"
+    r"Formas\s+de\s+pagamento|Galeria|Outros\s+produtos|Fazer\s+uma\s+proposta|Voltar|Caixa\s+Melhor|"
+    r"Existe\s+[áa]rea"
 )
 _RE_CONDOMINIO = re.compile(rf"Condom[íi]nio:\s*(.+?)\s*(?:Tributos:|{_STOP_RESP}|$)", re.IGNORECASE)
 _RE_TRIBUTOS = re.compile(rf"Tributos:\s*(.+?)\s*(?:{_STOP_RESP}|$)", re.IGNORECASE)
+# Nota separada da Caixa: "Existe área não averbada." → vira característica do imóvel.
+_RE_AREA_NAO_AVERBADA = re.compile(r"Existe\s+[áa]rea\s+n[ãa]o\s+averbada", re.IGNORECASE)
 # Formato combinado: "Tributos e condomínio: ..." / "Condomínio e tributos: ..." → mesmo valor pros dois.
 _RE_RESP_COMBINADO = re.compile(
     rf"(?:Tributos\s+e\s+condom[íi]nio|Condom[íi]nio\s+e\s+tributos):\s*(.+?)\s*(?:{_STOP_RESP}|$)",
@@ -109,6 +112,7 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
         "numeroImovel": numero,
         "aceitaFgts": bool(_RE_FGTS.search(text)),
         "recursosProprios": bool(_RE_RECURSOS.search(text)),
+        "areaNaoAverbada": bool(_RE_AREA_NAO_AVERBADA.search(text)),
         "inscricaoImobiliaria": _m(_RE_INSCRICAO, text),
         "cep": _m(_RE_CEP, text),
         "primeiroLeilaoData": primeiro_data,
