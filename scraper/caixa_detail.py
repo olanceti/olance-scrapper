@@ -34,16 +34,19 @@ _RE_PRECO_2 = re.compile(rf"m[íi]nimo\s+de\s+venda\s+2{_ORD}\s*{_LEILAO}:?\s*R\
 _RE_PRECO_UNICO = re.compile(r"m[íi]nimo\s+de\s+venda:\s*R\$\s*([\d.]+,\d{2})", re.IGNORECASE)
 
 # Responsabilidade — texto pode ser longo (explica limite de 10% etc.)
-# Palavras que marcam o fim do bloco (chrome da página) — pra não engolir o resto da tela.
-_STOP_RESP = (
+# _STOP_CHROME = onde acaba o conteúdo (lixo da página). _NOTE_MARKERS = notas extras
+# que aparecem abaixo das despesas (gravame, área não averbada). Condomínio/Tributos param em ambos.
+_STOP_CHROME = (
     r"Baixar|Regras\s+da|Edital|D[êe]\s+seu\s+lance|Sou\s+o\s+ex|Corretores|"
-    r"Formas\s+de\s+pagamento|Galeria|Outros\s+produtos|Fazer\s+uma\s+proposta|Voltar|Caixa\s+Melhor|"
-    r"Existe\s+[áa]rea"
+    r"Formas\s+de\s+pagamento|Galeria|Outros\s+produtos|Fazer\s+uma\s+proposta|Voltar|Caixa\s+Melhor"
 )
+_NOTE_MARKERS = r"Existe\s+[áa]rea|Im[óo]vel\s+com\s+gravame"
+_STOP_RESP = rf"{_STOP_CHROME}|{_NOTE_MARKERS}"
 _RE_CONDOMINIO = re.compile(rf"Condom[íi]nio:\s*(.+?)\s*(?:Tributos:|{_STOP_RESP}|$)", re.IGNORECASE)
 _RE_TRIBUTOS = re.compile(rf"Tributos:\s*(.+?)\s*(?:{_STOP_RESP}|$)", re.IGNORECASE)
-# Nota separada da Caixa: "Existe área não averbada." → vira característica do imóvel.
+# Flag "área não averbada" (mantido pra filtro futuro); o texto dela aparece em Informações adicionais.
 _RE_AREA_NAO_AVERBADA = re.compile(r"Existe\s+[áa]rea\s+n[ãa]o\s+averbada", re.IGNORECASE)
+_RE_NOTE_START = re.compile(_NOTE_MARKERS, re.IGNORECASE)
 # Formato combinado: "Tributos e condomínio: ..." / "Condomínio e tributos: ..." → mesmo valor pros dois.
 _RE_RESP_COMBINADO = re.compile(
     rf"(?:Tributos\s+e\s+condom[íi]nio|Condom[íi]nio\s+e\s+tributos):\s*(.+?)\s*(?:{_STOP_RESP}|$)",
@@ -65,6 +68,20 @@ def _parse_brl(s: str | None) -> float | None:
 def _m(pattern: re.Pattern, text: str) -> str | None:
     found = pattern.search(text)
     return found.group(1).strip() if found else None
+
+
+def _extract_info_adicional(text: str) -> str | None:
+    """Notas extras que aparecem ABAIXO das despesas (ex: gravame/penhora na matrícula,
+    área não averbada). Pega do 1º marcador de nota (_NOTE_MARKERS) até o chrome da
+    página. Vira a seção 'Informações adicionais' no leilão.
+    """
+    m = _RE_NOTE_START.search(text)  # primeiro marcador de nota (gravame, área não averbada)
+    if not m:
+        return None
+    after = text[m.start():]  # do marcador até o chrome da página
+    end = re.search(_STOP_CHROME, after, re.IGNORECASE)
+    notes = (after[: end.start()] if end else after).strip()
+    return notes or None
 
 
 def is_blocked(text: str) -> bool:
@@ -108,6 +125,8 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
         condominio = _m(_RE_CONDOMINIO, text)
         tributos = _m(_RE_TRIBUTOS, text)
 
+    info_adic = _extract_info_adicional(text)
+
     return {
         "numeroImovel": numero,
         "aceitaFgts": bool(_RE_FGTS.search(text)),
@@ -121,6 +140,7 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
         "segundoLeilaoPreco": segundo_preco,
         "condominioResponsavel": condominio[:400] if condominio else None,
         "tributosResponsavel": tributos[:400] if tributos else None,
+        "informacoesAdicionais": info_adic[:500] if info_adic else None,
     }
 
 
