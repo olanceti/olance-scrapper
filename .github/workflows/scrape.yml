@@ -2,10 +2,9 @@ name: Scraper Leilões Caixa
 
 on:
   schedule:
-    # 6 execuções/dia, a cada 4h (cada run pega um IP novo → ~130 detalhes/run).
-    # Minuto 17 (não :00) para evitar o congestionamento de agendamentos do GitHub.
-    # OBS: o gatilho confiável é o croner do Railway (workflow_dispatch); este cron é fallback.
-    - cron: '17 */4 * * *'
+    # Fallback 3×/dia (a cada 8h) — o gatilho confiável é o Railway via workflow_dispatch.
+    # Só age se o OLANCE ficar fora por horas. Minuto 17 evita congestionamento do GitHub.
+    - cron: '17 */8 * * *'
   workflow_dispatch:
     inputs:
       numero:
