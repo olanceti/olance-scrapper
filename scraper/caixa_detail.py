@@ -53,7 +53,42 @@ _RE_RESP_COMBINADO = re.compile(
     re.IGNORECASE,
 )
 
+# ── Extração de HTML sem BeautifulSoup ───────────────────────────────────────
+_RE_STRIP_TAGS = re.compile(r"<[^>]+>")
 _RE_EXIBEDOC = re.compile(r"ExibeDoc\(['\"]([^'\"]+)['\"]\)", re.IGNORECASE)
+# <h5> dentro de #dadosImovel (preferido) e fallback para o primeiro <h5> da página
+_RE_DADOS_H5 = re.compile(
+    r'id=["\']dadosImovel["\'][^>]*>.*?<h5[^>]*>(.*?)</h5>',
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_FIRST_H5 = re.compile(r"<h5[^>]*>(.*?)</h5>", re.IGNORECASE | re.DOTALL)
+
+
+def _html_to_text(html: str) -> str:
+    """Remove tags HTML e normaliza espaços — sem dependência externa."""
+    return " ".join(_RE_STRIP_TAGS.sub(" ", html).split())
+
+
+def _extract_edital_url_from_html(html: str) -> str | None:
+    """Extrai URL do edital a partir do HTML bruto (onclick ExibeDoc)."""
+    for m in _RE_EXIBEDOC.finditer(html):
+        path = m.group(1)
+        if "/matricula/" in path.lower():
+            continue  # é a matrícula, ignora (derivada no OLANCE)
+        return path if path.startswith("http") else f"{_BASE_URL}{path}"
+    return None
+
+
+def _extract_loteamento_from_html(html: str) -> str | None:
+    """Extrai o título do imóvel (h5 em #dadosImovel, fallback para 1º h5)."""
+    for pattern in (_RE_DADOS_H5, _RE_FIRST_H5):
+        m = pattern.search(html)
+        if not m:
+            continue
+        t = _RE_STRIP_TAGS.sub("", m.group(1)).strip()
+        if 2 <= len(t) <= 200:
+            return t
+    return None
 
 
 def _parse_brl(s: str | None) -> float | None:
@@ -144,46 +179,29 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
     }
 
 
-def _extract_edital_url(page) -> str | None:
-    """Lê o onclick `ExibeDoc('/editais/...PDF')` do botão de edital.
+def _checklist(data: dict) -> str:
+    """Linha de log compacta mostrando quais campos opcionais foram extraídos."""
+    def c(v) -> str:
+        return "✓" if v else "✗"
 
-    A matrícula NÃO é extraída aqui — sua URL é derivada no OLANCE (uf+numero).
-    """
-    try:
-        els = page.query_selector_all('[onclick*="ExibeDoc"]')
-        for el in els:
-            onclick = el.get_attribute("onclick") or ""
-            m = _RE_EXIBEDOC.search(onclick)
-            if not m:
-                continue
-            path = m.group(1)
-            if "/matricula/" in path.lower():
-                continue  # é a matrícula, ignora (derivada no OLANCE)
-            return path if path.startswith("http") else f"{_BASE_URL}{path}"
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
-def _extract_loteamento(page) -> str | None:
-    """Lê o título do imóvel (nome do loteamento/condomínio/localidade).
-
-    É o <h5> no topo do bloco de dados da Caixa — pega independente do TEXTO
-    (ex: 'LOT PQ VIDA NOVA...', 'VILLA VIC ... CONDOMÍNIO RAVENA'). Não vem no CSV.
-    Tenta dentro de #dadosImovel (mais específico) e cai pro 1º <h5> da página.
-    """
-    for sel in ("#dadosImovel h5", "h5"):
-        try:
-            el = page.query_selector(sel)
-            if not el:
-                continue
-            t = (el.inner_text() or "").strip()
-            # Sanidade: não vazio e tamanho plausível de um nome
-            if 2 <= len(t) <= 200:
-                return t
-        except Exception:  # noqa: BLE001
-            continue
-    return None
+    parts = [
+        f"lot={c(data.get('loteamento'))}",
+        f"cep={c(data.get('cep'))}",
+        f"edital={c(data.get('editalUrl'))}",
+        f"insc={c(data.get('inscricaoImobiliaria'))}",
+        f"1ºdt={c(data.get('primeiroLeilaoData'))}",
+        f"1ºR$={c(data.get('primeiroLeilaoPreco'))}",
+        f"2ºdt={c(data.get('segundoLeilaoData'))}",
+        f"2ºR$={c(data.get('segundoLeilaoPreco'))}",
+        f"cond={c(data.get('condominioResponsavel'))}",
+        f"trib={c(data.get('tributosResponsavel'))}",
+    ]
+    flags = "".join([
+        " fgts" if data.get("aceitaFgts") else "",
+        " rec-prop" if data.get("recursosProprios") else "",
+        " n-averb" if data.get("areaNaoAverbada") else "",
+    ])
+    return "  ".join(parts) + (f"  [{flags.strip()}]" if flags.strip() else "")
 
 
 def scrape_detail(page, numero: str) -> dict | None:
@@ -191,17 +209,26 @@ def scrape_detail(page, numero: str) -> dict | None:
     url = DETAIL_URL.format(numero=numero)
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(1_500)  # deixa o desafio JS resolver, se houver
-        text = page.inner_text("body")
+        # Aguarda o bloco de dados aparecer (mais rápido que wait_for_timeout fixo).
+        # Em páginas bloqueadas o seletor não existe e o timeout expira — is_blocked() trata abaixo.
+        try:
+            page.wait_for_selector("#dadosImovel", timeout=2_000)
+        except Exception:
+            pass
+        html = page.content()
     except Exception as exc:  # noqa: BLE001
         log.warning("[%s] erro ao carregar detalhe: %s", numero, exc)
         return None
+
+    # Texto limpo extraído do HTML sem round-trips adicionais ao browser
+    text = _html_to_text(html)
 
     data = parse_detail_text(text, numero)
     if data is None:
         log.warning("[%s] página bloqueada/sem conteúdo", numero)
         return None
 
-    data["editalUrl"] = _extract_edital_url(page)
-    data["loteamento"] = _extract_loteamento(page)
+    data["editalUrl"] = _extract_edital_url_from_html(html)
+    data["loteamento"] = _extract_loteamento_from_html(html)
+    log.info("[%s] %s", numero, _checklist(data))
     return data
