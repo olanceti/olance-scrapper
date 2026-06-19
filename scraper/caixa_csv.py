@@ -2,12 +2,13 @@
 
 Estratégia (espelha o script Puppeteer comprovado do OLANCE):
 1. Visita a página de download para estabelecer sessão e passar o desafio JS.
-2. Navega para a URL do CSV capturando a resposta byte-a-byte.
+2. Captura a resposta via event handler (evita "evicted" do expect_response).
 3. Fallback: lê o texto renderizado (innerText) e re-codifica em cp1252.
 """
 from __future__ import annotations
 
 import logging
+import threading
 
 from camoufox.sync_api import Camoufox
 
@@ -42,19 +43,42 @@ def download_csv(headless: bool = True) -> bytes:
         log.info("⬇️  Baixando CSV geral...")
         csv_bytes: bytes | None = None
 
-        # Caminho primário: captura a resposta byte-a-byte
+        # Caminho primário: response handler lê o body enquanto a resposta ainda está
+        # viva no buffer do Playwright — evita o "evicted" que ocorre ao ler
+        # resp_info.value.body() depois do with-block fechar.
+        _body: list[bytes | BaseException] = []
+        _ready = threading.Event()
+
+        def _on_csv_response(response) -> None:
+            if "Lista_imoveis_geral" not in response.url:
+                return
+            if not (200 <= response.status < 300):
+                log.warning("Resposta inesperada para CSV: HTTP %d", response.status)
+                _ready.set()
+                return
+            try:
+                _body.append(response.body())
+            except Exception as exc:  # noqa: BLE001
+                _body.append(exc)
+            _ready.set()
+
+        page.on("response", _on_csv_response)
         try:
-            with page.expect_response(
-                lambda r: "Lista_imoveis_geral" in r.url, timeout=300_000
-            ) as resp_info:
-                try:
-                    page.goto(CSV_URL, wait_until="commit", timeout=300_000)
-                except Exception:  # noqa: BLE001
-                    # navegação pode abortar se o CSV vier como download — resposta já foi capturada
-                    pass
-            csv_bytes = resp_info.value.body()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Captura de resposta falhou (%s), tentando innerText...", exc)
+            page.goto(CSV_URL, wait_until="commit", timeout=300_000)
+        except Exception:  # noqa: BLE001
+            # navegação pode abortar se o CSV vier como download — resposta já foi capturada
+            pass
+
+        if _ready.wait(timeout=300):
+            result = _body[0] if _body else None
+            if isinstance(result, bytes):
+                csv_bytes = result
+            else:
+                log.warning("Response handler falhou ao ler body: %s", result)
+        else:
+            log.warning("Timeout de 300s esperando response do CSV")
+
+        page.remove_listener("response", _on_csv_response)
 
         # Fallback: texto renderizado (só se a captura da resposta falhar)
         if not csv_bytes:
@@ -62,6 +86,9 @@ def download_csv(headless: bool = True) -> bytes:
                 text = page.inner_text("body")
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"Não foi possível ler o CSV: {exc}") from exc
+            # Log do conteúdo para diagnóstico de bloqueio anti-bot
+            preview = text[:300].replace("\n", " ↵ ")
+            log.warning("Fallback innerText (primeiros 300 chars): %s", preview)
             # Se o navegador mangleou o encoding (decodificou como UTF-8 e gerou o
             # char de substituição �), os acentos já estão perdidos. NÃO enviar lixo
             # — melhor falhar e deixar o próximo run (com a resposta crua) corrigir.
