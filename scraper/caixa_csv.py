@@ -1,17 +1,17 @@
 """Baixa o CSV geral de imóveis da Caixa usando Camoufox (burla o Radware Bot Manager).
 
-Estratégia:
+Estratégia em cascata:
 1. Visita SESSION_URL para estabelecer sessão e passar o desafio JS (Radware).
-2. Executa fetch() via page.evaluate() dentro do contexto do browser — herda cookies,
-   Referer e fingerprint sem navegar para o arquivo, evitando eviction e redirecionamentos.
-3. Fallback: navega diretamente para o CSV e captura via response handler.
+2. Interage com o formulário da página (clica no link/botão de download do CSV geral)
+   e captura o arquivo via page.expect_download().
+3. Fallback: urllib.request com os cookies da sessão do browser (mesmo IP, sessão válida).
 4. Fallback final: lê o texto renderizado (innerText) e re-codifica em cp1252.
 """
 from __future__ import annotations
 
-import base64
 import logging
-import threading
+import urllib.request
+from pathlib import Path
 
 from camoufox.sync_api import Camoufox
 
@@ -19,20 +19,6 @@ log = logging.getLogger("scraper.csv")
 
 CSV_URL = "https://venda-imoveis.caixa.gov.br/listaweb/Lista_imoveis_geral.csv"
 SESSION_URL = "https://venda-imoveis.caixa.gov.br/sistema/download-lista.asp"
-
-# JS que roda dentro do browser: fetch herda cookies da sessão, retorna base64
-_FETCH_JS = """async (url) => {
-    const resp = await fetch(url, { credentials: 'include' });
-    if (!resp.ok) return null;
-    const buf = await resp.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    let s = '';
-    const CHUNK = 8192;
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-        s += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-    }
-    return btoa(s);
-}"""
 
 
 def _has_data_lines(csv_bytes: bytes) -> bool:
@@ -44,11 +30,32 @@ def _has_data_lines(csv_bytes: bytes) -> bool:
     return False
 
 
+def _urllib_download(cookies: list[dict]) -> bytes | None:
+    """Baixa o CSV usando urllib com os cookies da sessão do browser."""
+    cookie_str = "; ".join(
+        f"{c['name']}={c['value']}"
+        for c in cookies
+        if "caixa.gov.br" in c.get("domain", "")
+    )
+    req = urllib.request.Request(
+        CSV_URL,
+        headers={
+            "Cookie": cookie_str,
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+            "Referer": SESSION_URL,
+            "Accept": "text/csv,text/plain,*/*",
+            "Accept-Language": "pt-BR,pt;q=0.9",
+            "Connection": "keep-alive",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
+        return resp.read()
+
+
 def download_csv(headless: bool = True) -> bytes:
     """Retorna os bytes brutos do CSV (windows-1252). Lança RuntimeError se bloqueado."""
     with Camoufox(headless=headless, humanize=True, locale="pt-BR") as browser:
         page = browser.new_page()
-        page.set_default_timeout(300_000)
 
         log.info("🌐 Estabelecendo sessão na Caixa...")
         try:
@@ -61,55 +68,49 @@ def download_csv(headless: bool = True) -> bytes:
         log.info("⬇️  Baixando CSV geral...")
         csv_bytes: bytes | None = None
 
-        # Caminho primário: fetch JS no contexto do browser (sem navegação, sem eviction)
+        # Caminho 1: interagir com o formulário da página e capturar via expect_download
+        # (o servidor agora redireciona navegação direta para o formulário)
         try:
-            b64: str | None = page.evaluate(_FETCH_JS, CSV_URL)
-            if b64:
-                csv_bytes = base64.b64decode(b64)
-                log.info("✅ CSV capturado via fetch JS")
-            else:
-                log.warning("fetch JS retornou null — servidor recusou o download (status não-2xx)")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("fetch JS falhou (%s), tentando navegação direta...", exc)
-
-        # Fallback: navegar para o CSV e capturar via response handler
-        if not csv_bytes:
-            _body: list[bytes | BaseException] = []
-            _ready = threading.Event()
-
-            def _on_csv_response(response) -> None:
-                if "Lista_imoveis_geral" not in response.url:
-                    return
-                if not (200 <= response.status < 300):
-                    log.warning("Resposta inesperada para CSV: HTTP %d", response.status)
-                    _ready.set()
-                    return
+            with page.expect_download(timeout=120_000) as dl_info:
+                # Tenta link direto para o CSV geral
                 try:
-                    _body.append(response.body())
-                except Exception as exc:  # noqa: BLE001
-                    _body.append(exc)
-                _ready.set()
+                    page.click('a[href*="Lista_imoveis_geral"]', timeout=5_000)
+                except Exception:  # noqa: BLE001
+                    # Tenta botões/links de download genéricos na página
+                    page.click(
+                        'a:has-text("ista completa"), '
+                        'button:has-text("ista completa"), '
+                        'a[href*="geral"], '
+                        'a:has-text("ownload"), '
+                        'button:has-text("ownload"), '
+                        'a:has-text("aixar"), '
+                        'button:has-text("aixar"), '
+                        'input[type="submit"]',
+                        timeout=10_000,
+                    )
+            dl = dl_info.value
+            dl_path = dl.path()
+            if dl_path:
+                csv_bytes = Path(dl_path).read_bytes()
+                log.info("✅ CSV capturado via download do formulário")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Download via formulário falhou (%s), tentando urllib...", exc)
 
-            page.on("response", _on_csv_response)
+        # Caminho 2: urllib com cookies da sessão (mesmo IP, sessão validada pelo Radware)
+        if not csv_bytes:
             try:
-                page.goto(CSV_URL, wait_until="commit", timeout=300_000)
-            except Exception:  # noqa: BLE001
-                # navegação pode abortar se o CSV vier como download
-                pass
-
-            if _ready.wait(timeout=120):
-                result = _body[0] if _body else None
-                if isinstance(result, bytes):
-                    csv_bytes = result
-                    log.info("✅ CSV capturado via response handler")
+                cookies = page.context.cookies()
+                csv_bytes = _urllib_download(cookies)
+                if csv_bytes and _has_data_lines(csv_bytes):
+                    log.info("✅ CSV capturado via urllib")
                 else:
-                    log.warning("Response handler falhou ao ler body: %s", result)
-            else:
-                log.warning("Timeout esperando response do CSV via navegação")
+                    preview = (csv_bytes or b"")[:200].decode("latin-1", errors="replace")
+                    log.warning("urllib retornou conteúdo inválido (preview): %s", preview)
+                    csv_bytes = None
+            except Exception as exc:  # noqa: BLE001
+                log.warning("urllib falhou (%s), tentando innerText...", exc)
 
-            page.remove_listener("response", _on_csv_response)
-
-        # Fallback final: texto renderizado
+        # Caminho 3: texto renderizado (last resort)
         if not csv_bytes:
             try:
                 text = page.inner_text("body")
