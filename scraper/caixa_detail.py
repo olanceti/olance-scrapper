@@ -94,6 +94,15 @@ def is_blocked(text: str) -> bool:
     return "leil" not in lowered and "venda" not in lowered
 
 
+def is_unavailable(text: str) -> bool:
+    """Detecta página de erro 'imóvel não disponível' — saiu da Caixa."""
+    lowered = text.lower()
+    return (
+        "não está mais disponível para venda" in lowered
+        or "ocorreu um erro ao tentar recuperar os dados do imóvel" in lowered
+    )
+
+
 def parse_detail_text(raw_text: str, numero: str) -> dict | None:
     """Extrai os campos do texto da página. Retorna None se a página estiver bloqueada."""
     if is_blocked(raw_text):
@@ -212,7 +221,12 @@ def _extract_loteamento(page) -> str | None:
 
 
 def scrape_detail(page, numero: str) -> dict | None:
-    """Navega até o detalhe e extrai os dados. Retorna None se bloqueado/erro."""
+    """Navega até o detalhe e extrai os dados.
+
+    Retorna None se bloqueado/erro.
+    Retorna {"removido": True, "numeroImovel": numero} se o imóvel saiu da Caixa.
+    Retorna os dados extraídos em todos os outros casos.
+    """
     url = DETAIL_URL.format(numero=numero)
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -221,6 +235,10 @@ def scrape_detail(page, numero: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         log.warning("[%s] erro ao carregar detalhe: %s", numero, exc)
         return None
+
+    if is_unavailable(text):
+        log.info("[%s] não disponível na Caixa — será removido do OLANCE", numero)
+        return {"removido": True, "numeroImovel": numero}
 
     data = parse_detail_text(text, numero)
     if data is None:

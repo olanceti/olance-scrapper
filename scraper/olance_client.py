@@ -54,3 +54,18 @@ class OlanceClient:
         resp.raise_for_status()
         data = resp.json()
         return int(data.get("updated", 0))
+
+    def remove_items(self, numeros: list[str]) -> int:
+        """Remove imóveis não disponíveis na Caixa do OLANCE. Retorna a quantidade removida."""
+        if not numeros:
+            return 0
+        url = f"{self.base_url}/api/admin/leiloes/remove-batch"
+        resp = httpx.post(
+            url,
+            json={"numeros": numeros},
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return int(data.get("removed", 0))

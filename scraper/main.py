@@ -50,16 +50,25 @@ def _warmup(page) -> None:
         log.warning("Aviso no warmup: %s", exc)
 
 
-def _scrape_loop(page, numeros: list[str], cfg, buffer: list[dict], flush, stats: dict) -> bool:
+def _scrape_loop(
+    page, numeros: list[str], cfg,
+    buffer: list[dict], flush,
+    removidos: list[str], flush_removidos,
+    stats: dict,
+) -> bool:
     """Raspa cada imóvel. Retorna True se foi interrompido por bloqueio em série."""
     consecutive_blocks = 0
     total = len(numeros)
     for i, numero in enumerate(numeros, start=1):
         data = scrape_detail(page, numero)
         if data is not None:
-            buffer.append(data)
-            stats["scraped"] += 1
-            consecutive_blocks = 0
+            if data.get("removido"):
+                removidos.append(numero)
+                consecutive_blocks = 0  # não conta como bloqueio
+            else:
+                buffer.append(data)
+                stats["scraped"] += 1
+                consecutive_blocks = 0
         else:
             consecutive_blocks += 1
             if consecutive_blocks >= CONSECUTIVE_BLOCK_LIMIT:
@@ -72,10 +81,15 @@ def _scrape_loop(page, numeros: list[str], cfg, buffer: list[dict], flush, stats
 
         if len(buffer) >= FLUSH_EVERY:
             flush()
+        if len(removidos) >= FLUSH_EVERY:
+            flush_removidos()
         if i < total:
             time.sleep(random.uniform(cfg.detail_min_delay, cfg.detail_max_delay))
         if i % 25 == 0:
-            log.info("   progresso: %d/%d raspados=%d", i, total, stats["scraped"])
+            log.info(
+                "   progresso: %d/%d raspados=%d removidos=%d",
+                i, total, stats["scraped"], stats["removed"],
+            )
     return False
 
 
@@ -86,8 +100,9 @@ def enrich_details(client: OlanceClient, cfg) -> None:
         return
 
     log.info("🔎 Enriquecendo %d imóveis (raspando detalhes)...", len(numeros))
-    stats = {"scraped": 0, "sent": 0}
+    stats = {"scraped": 0, "sent": 0, "removed": 0}
     buffer: list[dict] = []
+    removidos: list[str] = []
 
     def flush() -> None:
         if not buffer:
@@ -97,14 +112,26 @@ def enrich_details(client: OlanceClient, cfg) -> None:
         log.info("   ↳ lote enviado: %d atualizados (acumulado %d)", updated, stats["sent"])
         buffer.clear()
 
+    def flush_removidos() -> None:
+        if not removidos:
+            return
+        removed = client.remove_items(removidos)
+        stats["removed"] += removed
+        log.info("   ↳ %d removidos do OLANCE (não disponíveis na Caixa)", removed)
+        removidos.clear()
+
     with Camoufox(headless=cfg.headless, humanize=True, locale="pt-BR") as browser:
         page = browser.new_page()
         _warmup(page)
-        aborted = _scrape_loop(page, numeros, cfg, buffer, flush, stats)
+        aborted = _scrape_loop(page, numeros, cfg, buffer, flush, removidos, flush_removidos, stats)
         flush()
+        flush_removidos()
 
     status = "interrompido (IP bloqueado)" if aborted else "concluído"
-    log.info("✅ Enriquecimento %s: %d raspados, %d salvos no OLANCE", status, stats["scraped"], stats["sent"])
+    log.info(
+        "✅ Enriquecimento %s: %d raspados, %d salvos, %d removidos do OLANCE",
+        status, stats["scraped"], stats["sent"], stats["removed"],
+    )
 
 
 def enrich_single(client: OlanceClient, cfg, numero: str) -> int:
@@ -122,6 +149,11 @@ def enrich_single(client: OlanceClient, cfg, numero: str) -> int:
     if data is None:
         log.warning("⚠️ Imóvel %s bloqueado/sem conteúdo — não enriquecido.", numero)
         return 1
+
+    if data.get("removido"):
+        removed = client.remove_items([numero])
+        log.info("✅ Imóvel %s não disponível na Caixa — removido do OLANCE (%d).", numero, removed)
+        return 0
 
     updated = client.post_enrichment([data])
     log.info("✅ Imóvel %s enriquecido (%d atualizado no OLANCE).", numero, updated)
