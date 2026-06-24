@@ -46,6 +46,7 @@ _RE_CONDOMINIO = re.compile(rf"Condom[íi]nio:\s*(.+?)\s*(?:Tributos:|{_STOP_RES
 _RE_TRIBUTOS = re.compile(rf"Tributos:\s*(.+?)\s*(?:{_STOP_RESP}|$)", re.IGNORECASE)
 # Flag "área não averbada" (mantido pra filtro futuro); o texto dela aparece em Informações adicionais.
 _RE_AREA_NAO_AVERBADA = re.compile(r"Existe\s+[áa]rea\s+n[ãa]o\s+averbada", re.IGNORECASE)
+_RE_DISPUTA = re.compile(r"Im[óo]vel\s+em\s+disputa", re.IGNORECASE)
 _RE_NOTE_START = re.compile(_NOTE_MARKERS, re.IGNORECASE)
 # Formato combinado: "Tributos e condomínio: ..." / "Condomínio e tributos: ..." → mesmo valor pros dois.
 _RE_RESP_COMBINADO = re.compile(
@@ -141,6 +142,7 @@ def parse_detail_text(raw_text: str, numero: str) -> dict | None:
         "aceitaFgts": bool(_RE_FGTS.search(text)),
         "recursosProprios": bool(_RE_RECURSOS.search(text)),
         "areaNaoAverbada": bool(_RE_AREA_NAO_AVERBADA.search(text)),
+        "emDisputa": bool(_RE_DISPUTA.search(text)),
         "inscricaoImobiliaria": _m(_RE_INSCRICAO, text),
         "cep": _m(_RE_CEP, text),
         "primeiroLeilaoData": primeiro_data,
@@ -174,6 +176,7 @@ def _checklist(data: dict) -> str:
         " fgts" if data.get("aceitaFgts") else "",
         " rec-prop" if data.get("recursosProprios") else "",
         " n-averb" if data.get("areaNaoAverbada") else "",
+        " DISPUTA" if data.get("emDisputa") else "",
     ])
     return "  ".join(parts) + (f"  [{flags.strip()}]" if flags.strip() else "")
 
